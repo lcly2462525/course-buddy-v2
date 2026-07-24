@@ -1,6 +1,7 @@
 import argparse
 import glob
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -10,7 +11,7 @@ from rich.console import Console
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
-from .canvas_api import filter_real_courses, get_active_courses
+from .canvas_api import TOKEN_FILE, filter_real_courses, get_active_courses, load_canvas_token
 from .config import load_config
 from .notes import summarize_transcript_files
 from .replay_api import (
@@ -18,6 +19,7 @@ from .replay_api import (
     get_cookies_from_browser,
     get_video_list,
     get_video_platform_token,
+    load_cookies,
     save_cookies,
     validate_cookies,
 )
@@ -458,112 +460,200 @@ def cmd_all(args) -> int:
     return result
 
 
+_LLM_PROVIDERS = [
+    ("1", "aihubmix（默认，推荐）", "https://aihubmix.com/v1", "qwen3-max"),
+    ("2", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
+    ("3", "OpenAI", "https://api.openai.com/v1", "gpt-4o"),
+    ("4", "阿里云通义（Qwen）", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-max"),
+    ("5", "硅基流动（SiliconFlow）", "https://api.siliconflow.cn/v1", "Qwen3-235B-A22B"),
+    ("6", "自定义（兼容 OpenAI 接口）", None, "your-model"),
+]
+
+
+def _upsert_env(config_dir: Path, key: str, value: str) -> Path:
+    """把 KEY=VALUE 写进 config 目录下的 .env（存在则更新，不动其他行）。"""
+    env_path = config_dir / ".env"
+    lines: list[str] = []
+    found = False
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} ="):
+                lines.append(f"{key}={value}")
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(env_path, 0o600)
+    except Exception:
+        pass
+    return env_path
+
+
+def _save_canvas_token(token: str) -> None:
+    token_path = Path(TOKEN_FILE).expanduser()
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(token.strip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(token_path, 0o600)
+    except Exception:
+        pass
+
+
+def _status_rows(config_path: str) -> list[tuple[str, bool, str]]:
+    """返回各项凭据状态：(名称, 是否就绪, 提示)。"""
+    rows = []
+    # load_config 会在缺文件时自动创建，所以先调它，再报告 config 状态。
+    try:
+        cfg = load_config(config_path)
+    except Exception:
+        cfg = {}
+    resolved = Path(config_path).expanduser().resolve()
+    rows.append(("配置文件 config.yaml", resolved.exists(), str(resolved)))
+    from .notes import _get_llm_config  # 局部导入，避免循环
+
+    llm = _get_llm_config(cfg.get("llm") or {})
+    has_key = bool(llm.get("api_key"))
+    rows.append(("AI API Key", has_key, "已配置" if has_key else "cb setup 里填，或写入 .env 的 LLM_API_KEY"))
+
+    token = load_canvas_token()
+    rows.append(("Canvas Token", bool(token), "已配置" if token else "cb setup 里填，或写入 ~/.config/canvas/token"))
+
+    cookies = None
+    try:
+        cookies = load_cookies(cfg.get("cookies_path"))
+    except Exception:
+        cookies = None
+    cookie_ok = bool(cookies) and validate_cookies(cookies)
+    if cookie_ok:
+        cookie_hint = "登录态有效"
+    elif cookies:
+        cookie_hint = "cookie 存在但已失效，跑 cb login 刷新"
+    else:
+        cookie_hint = "跑 cb login 导入登录态"
+    rows.append(("登录态 Cookie", cookie_ok, cookie_hint))
+    return rows
+
+
+def cmd_doctor(args) -> int:
+    """体检：一眼看清三样凭据齐了没。"""
+    rows = _status_rows(args.config)
+    table = Table(title="course-buddy 体检")
+    table.add_column("项目")
+    table.add_column("状态")
+    table.add_column("说明")
+    for name, ok, hint in rows:
+        table.add_row(name, "[green]✓ 就绪[/green]" if ok else "[red]✗ 未配置[/red]", hint)
+    console.print(table)
+    if all(ok for _, ok, _ in rows):
+        console.print("[green]全部就绪，可以开始：cb alias 数值 <课程ID> 然后 cb 数值[/green]")
+    else:
+        console.print("[yellow]有项目未配置。运行 [bold]cb setup[/bold] 一步步补齐。[/yellow]")
+    return 0
+
+
+def _setup_llm(config_dir: Path, data: dict) -> None:
+    console.print("\n[bold yellow]① AI（用来把转录整理成笔记）[/bold yellow]")
+    existing_key = os.environ.get("LLM_API_KEY") or (data.get("llm") or {}).get("api_key")
+    if existing_key:
+        if not Confirm.ask("检测到已配置 AI Key，要重新设置吗？", default=False):
+            return
+    for code, name, _, _ in _LLM_PROVIDERS:
+        console.print(f"  {code}. {name}")
+    choice = Prompt.ask("选择提供商", choices=[c for c, *_ in _LLM_PROVIDERS], default="1")
+    _, provider_name, base_url, default_model = next(p for p in _LLM_PROVIDERS if p[0] == choice)
+    if choice == "6":
+        base_url = Prompt.ask("API 基础地址", default="https://example.com/v1")
+    model = Prompt.ask("模型名称", default=default_model)
+    api_key = Prompt.ask("API Key（粘贴，直接回车可跳过）", default="", password=True)
+
+    data.setdefault("llm", {})
+    data["llm"].update({"enabled": True, "api_key": "", "api_key_env": "LLM_API_KEY", "base_url": base_url, "model": model})
+    if api_key:
+        env_path = _upsert_env(config_dir, "LLM_API_KEY", api_key)
+        console.print(f"[green]✓ Key 已安全存入[/green] {env_path}（不进 git）")
+    else:
+        console.print("[yellow]（跳过 Key，之后可再跑 cb setup 或编辑 .env）[/yellow]")
+
+
+def _setup_canvas_token() -> None:
+    console.print("\n[bold yellow]② Canvas Token（用来列出你的课）[/bold yellow]")
+    if load_canvas_token():
+        if not Confirm.ask("检测到已有 Canvas Token，要重新设置吗？", default=False):
+            return
+    console.print("[dim]获取：登录 Canvas → 账户 → 设置 → 最底部「+ 新建访问令牌」→ 复制[/dim]")
+    token = Prompt.ask("粘贴 Canvas Token（直接回车可跳过）", default="", password=True)
+    if token.strip():
+        _save_canvas_token(token)
+        console.print(f"[green]✓ 已保存到[/green] {TOKEN_FILE}")
+    else:
+        console.print("[yellow]（跳过）[/yellow]")
+
+
+def _setup_cookies(cfg: dict) -> None:
+    console.print("\n[bold yellow]③ 登录态 Cookie（用来进回放平台拿转录）[/bold yellow]")
+    cookie_path = cfg.get("cookies_path")
+    existing = None
+    try:
+        existing = load_cookies(cookie_path)
+    except Exception:
+        existing = None
+    if existing and validate_cookies(existing):
+        console.print("[green]✓ 现有登录态仍有效，无需重设。[/green]")
+        return
+    console.print("请先在浏览器登录 https://oc.sjtu.edu.cn。导入方式：")
+    console.print("  1. 文件（EditThisCookie 导出的 JSON 路径）")
+    console.print("  2. 粘贴 Cookie 请求头字符串")
+    console.print("  3. 尝试从浏览器自动读取（可能弹钥匙串）")
+    console.print("  4. 跳过（之后用 cb login）")
+    pick = Prompt.ask("选择", choices=["1", "2", "3", "4"], default="4")
+    try:
+        if pick in ("1", "2"):
+            raw = Prompt.ask("粘贴文件路径 或 Cookie 字符串")
+            cookies = _parse_cookie_source(raw)
+            save_cookies(cookies, cookie_path)
+            ok = validate_cookies(cookies)
+            console.print(("[green]✓ 已保存" if ok else "[yellow]已保存（未通过校验，可能过期）") + f"[/]"
+                          )
+        elif pick == "3":
+            cookies = get_cookies_from_browser(cfg.get("cookies_from_browser", "auto"))
+            if cookies and validate_cookies(cookies):
+                save_cookies(cookies, cookie_path)
+                console.print("[green]✓ 自动读取成功。[/green]")
+            else:
+                console.print("[yellow]自动读取失败，之后用 cb login。[/yellow]")
+        else:
+            console.print("[yellow]（跳过，之后用 cb login）[/yellow]")
+    except Exception as exc:
+        console.print(f"[yellow]cookie 设置未完成：{exc}。之后可用 cb login。[/yellow]")
+
+
 def cmd_setup(args) -> int:
-    """交互式初始化配置向导"""
+    """一步步配置三样凭据：AI Key、Canvas Token、登录态 Cookie。"""
     config_path = Path(args.config).expanduser().resolve()
     config_dir = config_path.parent
-
-    console.print("[bold cyan]欢迎使用 course-buddy-v2 配置向导[/bold cyan]\n")
-
-    # 选择 LLM 提供商
-    console.print("[yellow]第一步：选择 LLM 提供商[/yellow]")
-    console.print("请选择一个提供商（或输入 custom 自定义）：\n")
-    providers = [
-        ("1", "aihubmix（默认，推荐）", "https://aihubmix.com/v1", "LLM_API_KEY"),
-        ("2", "OpenAI", "https://api.openai.com/v1", "OPENAI_API_KEY"),
-        ("3", "DeepSeek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
-        ("4", "阿里云通义（Qwen）", "https://dashscope.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"),
-        ("5", "硅基流动（SiliconFlow）", "https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY"),
-        ("6", "自定义", None, None),
-    ]
-    for code, name, _, _ in providers:
-        console.print(f"  {code}. {name}")
-    
-    choice = Prompt.ask("\n请选择 (1-6)", choices=["1", "2", "3", "4", "5", "6"])
-    
-    selected = next((p for p in providers if p[0] == choice), None)
-    if not selected:
-        console.print("[red]无效选择[/red]")
-        return 1
-    
-    _, provider_name, base_url, api_key_env = selected
-    
-    if choice == "6":
-        # 自定义提供商
-        console.print("\n[yellow]自定义 LLM 提供商[/yellow]")
-        base_url = Prompt.ask("请输入 API 基础地址", default="https://example.com/v1")
-        api_key = Prompt.ask("请输入 API Key（或留空，稍后在环境变量中设置）", default="", password=True)
-        api_key_env = "LLM_API_KEY"
-        provider_name = "custom"
-    else:
-        # 内置提供商
-        model_hint = {
-            "1": "qwen-turbo",
-            "2": "gpt-4o",
-            "3": "deepseek-chat",
-            "4": "qwen-max",
-            "5": "Qwen3-235B-A22B",
-        }.get(choice, "")
-        api_key = Prompt.ask(f"\n请输入 {provider_name} 的 API Key（或留空，稍后在环境变量中设置）", default="", password=True)
-    
-    # 选择模型
-    console.print("\n[yellow]第二步：选择模型[/yellow]")
-    if choice == "6":
-        model = Prompt.ask("请输入模型名称", default="your-model")
-    else:
-        model_hint = {
-            "1": "qwen-turbo",
-            "2": "gpt-4o",
-            "3": "deepseek-chat",
-            "4": "qwen-max",
-            "5": "Qwen3-235B-A22B",
-        }.get(choice, "")
-        model = Prompt.ask(f"请输入模型名称", default=model_hint)
-    
-    # 其他配置
-    console.print("\n[yellow]第三步：其他设置[/yellow]")
-    use_proxy = Confirm.ask("是否使用环境变量中的代理（HTTP_PROXY/HTTPS_PROXY）？", default=True)
-    
-    # 构建配置
-    config = {
-        "root_dir": "data",
-        "cookies_path": "~/.config/canvas/cookies.json",
-        "cookies_from_browser": "auto",
-        "courses": {},
-        "llm": {
-            "enabled": True,
-            "api_key": api_key if api_key else "",
-            "api_key_env": api_key_env,
-            "base_url": base_url,
-            "model": model,
-            "temperature": 0.3,
-            "use_env_proxy": use_proxy,
-            "request_timeout": 600,
-            "retries": 3,
-            "notes_chunk_minutes": 12,
-            "notes_chunk_max_chars": 12000,
-            "notes_chunk_output_tokens": 2200,
-            "notes_merge_max_tokens": 8000,
-            "providers": {},
-        },
-    }
-    
-    # 保存配置
     config_dir.mkdir(parents=True, exist_ok=True)
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-    
-    console.print(f"\n[green]✓ 配置已保存到：{config_path}[/green]")
-    
-    if not api_key:
-        console.print(f"[yellow]⚠️  提醒：你选择了在环境变量中设置 API Key[/yellow]")
-        console.print(f"   请在终端执行：[bold]export {api_key_env}=你的APIKey[/bold]")
-    
-    console.print("\n[cyan]下一步，请准备：[/cyan]")
-    console.print("  1. Canvas API Token → ~/.config/canvas/token")
-    console.print("  2. 浏览器 Cookie → 工具自动读取或手动配置")
-    console.print("\n之后就可以开始使用了：[bold]cb list[/bold]")
-    
+
+    console.print("[bold cyan]course-buddy 配置向导[/bold cyan] — 跟着走，缺啥补啥，能跳过。\n")
+
+    path, data = _load_raw_config(str(config_path))
+    if not data:
+        from .config import DEFAULT_CONFIG
+        data = dict(DEFAULT_CONFIG)
+
+    _setup_llm(config_dir, data)
+
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+    _setup_canvas_token()
+    _setup_cookies(load_config(str(config_path)))
+
+    console.print("\n[bold]配置完成，体检结果：[/bold]")
+    cmd_doctor(args)
     return 0
 
 
@@ -735,11 +825,11 @@ _MANUAL_SECTIONS = [
         ("cb all 数值 -i 3", "整理指定第 3 讲（0 是最新）"),
         ("cb notes 数值 -l --free", "不用 LLM，只出平台摘要（免费快速）"),
     ]),
-    ("认证与配置", [
-        ("cb login", "登录态失效时，按提示导入 cookie（最稳）"),
-        ("cb login ~/cookies.json", "用 EditThisCookie 导出的 JSON 导入"),
+    ("第一次用（配置）", [
+        ("cb setup", "一步步配好三样凭据：AI Key / Canvas Token / Cookie"),
+        ("cb doctor", "体检：看三样凭据齐了没"),
+        ("cb login", "登录态失效时，重新导入 cookie"),
         ("cb alias 数值 88918", "给课程起别名，之后哪都能用「数值」"),
-        ("cb setup", "交互式配置 LLM（也可直接编辑 .env / config.yaml）"),
     ]),
     ("查看与列举", [
         ("cb list", "列出本学期所有课程（含别名）"),
@@ -820,7 +910,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("help", aliases=["手册", "帮助"], help="显示实用手册（也可直接输入 cb）").set_defaults(handler=cmd_help)
 
-    sub.add_parser("setup", help="交互式配置向导").set_defaults(handler=cmd_setup)
+    sub.add_parser("setup", help="一步步配置三样凭据（AI Key / Canvas Token / Cookie）").set_defaults(handler=cmd_setup)
+
+    sub.add_parser("doctor", aliases=["体检", "check"], help="体检：三样凭据齐了没").set_defaults(handler=cmd_doctor)
 
     p = sub.add_parser("login", help="设置/刷新 oc.sjtu.edu.cn 登录 cookie")
     p.add_argument("source", nargs="?", help="cookie 文件路径 或 'k=v; k2=v2' 字符串；省略则给手动导入引导")

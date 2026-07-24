@@ -16,15 +16,15 @@
 你的一条命令  →  登录 Canvas  →  抓这门课的转录文字  →  AI 整理  →  笔记.md 存到本地
 ```
 
-三样东西它需要你准备一次（下面第一步会带你做）：
+三样东西它需要你准备一次——**全部由 `cb setup` 一条命令引导完成**，你只管粘贴：
 
-| 需要什么 | 干嘛用的 | 怎么给 |
-|---|---|---|
-| **Canvas Token** | 让它能列出你的课 | 存到一个文件里 |
-| **登录 Cookie** | 让它能进回放平台拿转录 | `cb login` 导入 |
-| **AI 的 API Key** | 让它能把转录整理成笔记 | 写进 `.env` 文件 |
+| 需要什么 | 干嘛用的 |
+|---|---|
+| **AI 的 API Key** | 让它能把转录整理成笔记 |
+| **Canvas Token** | 让它能列出你的课 |
+| **登录 Cookie** | 让它能进回放平台拿转录 |
 
-> 只想要**忠实的转录文字**、自己再喂给别的 AI？那第 3 样（API Key）可以先不管，用 `cb fetch` 就行。
+> 只想要**忠实的转录文字**、自己再喂给别的 AI？那 API Key 可以先跳过，用 `cb fetch` 就行。
 
 ---
 
@@ -53,54 +53,38 @@ cb
 
 ---
 
-## 第二步：准备三样凭据
+## 第二步：一条命令配好（`cb setup`）
 
-### ① Canvas Token（让它能看到你的课）
-
-1. 浏览器登录 Canvas → 右上角 **账户 → 设置**
-2. 拉到最底部，点 **+ 新建访问令牌**，生成后**复制**那串字符
-3. 存进文件（把下面第二行的内容换成你复制的）：
+配置全交给向导，你只管跟着填：
 
 ```bash
-mkdir -p ~/.config/canvas
-echo "把复制的令牌粘到这里" > ~/.config/canvas/token
+cb setup
 ```
 
-验证一下：
+它会依次问你三样东西，**每样都能跳过、也能保持已有的不动**：
+
+1. **AI Key** —— 选提供商、粘贴 key（自动存进 `.env`，不进 git）
+2. **Canvas Token** —— 粘贴令牌（自动存好）
+3. **登录态 Cookie** —— 选文件导入 / 粘贴 / 自动读取 / 跳过
+
+> config.yaml 不用手动建——缺了会自动生成。
+
+配完随时体检，一眼看清缺没缺：
 
 ```bash
-cb list
+cb doctor
 ```
 
-能列出你本学期的课（含课程 ID），这一步就成了。
+三项都 ✓ 就绪，就能开始用了。
 
-### ② 登录 Cookie（让它能拿转录）
+<details>
+<summary>这三样分别去哪拿？（点开看）</summary>
 
-先确保浏览器里**已经登录过** [oc.sjtu.edu.cn](https://oc.sjtu.edu.cn)，然后：
+- **AI Key**：aihubmix / DeepSeek / OpenAI / 通义 等任一家的 API Key。默认用 aihubmix。
+- **Canvas Token**：登录 Canvas → 右上角 **账户 → 设置** → 最底部 **+ 新建访问令牌** → 复制。
+- **登录 Cookie**：先浏览器登录 [oc.sjtu.edu.cn](https://oc.sjtu.edu.cn)；导入最省心的方式是装 [EditThisCookie](https://chromewebstore.google.com/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg) 扩展，在该站点页面 Export 成文件，setup 时选「文件」填路径即可。Cookie 会过期，失效了重跑 `cb login` 刷新。
 
-```bash
-cb login
-```
-
-它会给你几种导入方式，**最省心的一种**是：
-
-1. 浏览器装个 [EditThisCookie](https://chromewebstore.google.com/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg) 扩展
-2. 在 oc.sjtu.edu.cn 页面点它 → **Export（导出）** → 存成一个文件，比如 `~/cookies.json`
-3. 运行：`cb login ~/cookies.json`
-
-> Cookie 会过期。以后哪天抓取报错说"登录态失效"，重跑一次 `cb login` 就好。
-
-### ③ AI 的 API Key（让它能整理成笔记）
-
-在**项目根目录**新建一个 `.env` 文件，写一行：
-
-```
-LLM_API_KEY=sk-你的key
-```
-
-默认用的是 aihubmix（一个聚合接口）。想换别家（DeepSeek / OpenAI / 通义…）见文末 [支持的 AI 提供商](#支持的-ai-提供商)。
-
-> 不确定怎么填？可以跑 `cb setup`，它会一步步问你。
+</details>
 
 ---
 
@@ -208,8 +192,8 @@ data/downloads/<课程ID>/
 
 ## 出问题了？对号入座
 
-**敲 `cb list` 说找不到 token**
-→ 检查 `~/.config/canvas/token` 文件在不在、内容对不对（别有多余空格或换行）。
+**任何命令说"没配置 XX / 找不到 token"**
+→ 跑 `cb doctor` 看缺哪样，再 `cb setup` 补上。不用手动建文件。
 
 **抓取/`fetch` 说登录态、Cookie 失效**
 → 重跑 `cb login`，按提示导入一次（`cb login ~/cookies.json` 最稳）。Cookie 过期是正常现象。

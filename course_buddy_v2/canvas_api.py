@@ -19,7 +19,7 @@ def get_active_courses(token: Optional[str] = None) -> List[Dict]:
         token = load_canvas_token()
     if not token:
         raise RuntimeError(
-            "未找到 Canvas API Token。请先配置 ~/.config/canvas/token 或 CANVAS_TOKEN。"
+            "还没配置 Canvas Token。跑 [bold]cb setup[/bold] 一步步配好，或用 cb doctor 看缺哪几样。"
         )
 
     headers = {"Authorization": f"Bearer {token}"}
