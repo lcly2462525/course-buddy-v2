@@ -1,0 +1,21 @@
+root_dir: data
+cookies_path: ~/.config/canvas/cookies.json
+cookies_from_browser: auto
+courses: {}
+llm:
+  enabled: true
+  # 直接填写也可以；如果不填，就会读取 api_key_env 对应的环境变量。
+  api_key: ""
+  api_key_env: LLM_API_KEY
+  # 自定义兼容 OpenAI 的接口地址；留空时使用默认聚合接口。
+  base_url: https://aihubmix.com/v1
+  model: qwen3-max
+  temperature: 0.3
+  use_env_proxy: true
+  request_timeout: 600
+  retries: 3
+  notes_chunk_minutes: 12
+  notes_chunk_max_chars: 12000
+  notes_chunk_output_tokens: 3200
+  notes_merge_max_tokens: 12000
+  providers: {}

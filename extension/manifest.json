@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Course Buddy · 转录与笔记",
+  "version": "0.1.0",
+  "description": "在交大 Canvas 回放页一键下载语音转录，并用 AI 生成结构化笔记。运行在你已登录的浏览器里，无需服务器、无需端口。",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "webRequest",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://oc.sjtu.edu.cn/*",
+    "https://v.sjtu.edu.cn/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Course Buddy"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://oc.sjtu.edu.cn/courses/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html"
+}

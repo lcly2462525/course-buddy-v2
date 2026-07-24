@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { max-width: 520px; margin: 24px auto; font-family: system-ui, -apple-system, sans-serif; font-size: 14px; color: #222; padding: 0 16px; }
+    h1 { font-size: 18px; }
+    label { display: block; margin: 14px 0 4px; font-weight: 600; }
+    input, select { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; }
+    .hint { color: #666; font-size: 12px; margin-top: 4px; }
+    button { margin-top: 18px; padding: 10px 18px; border: none; border-radius: 8px; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
+    #saved { color: #059669; margin-left: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Course Buddy 设置</h1>
+  <p class="hint">这里只需填一次。API Key 存在浏览器本地（chrome.storage.local），不会上传到任何服务器。</p>
+
+  <label>提供商预设</label>
+  <select id="preset">
+    <option value="https://aihubmix.com/v1|qwen3-max">aihubmix（默认）· qwen3-max</option>
+    <option value="https://api.deepseek.com/v1|deepseek-chat">DeepSeek · deepseek-chat</option>
+    <option value="https://api.openai.com/v1|gpt-4o">OpenAI · gpt-4o</option>
+    <option value="https://dashscope.aliyuncs.com/compatible-mode/v1|qwen-max">阿里云通义 · qwen-max</option>
+    <option value="custom|">自定义…</option>
+  </select>
+
+  <label>API 基础地址 (base_url)</label>
+  <input id="baseUrl" placeholder="https://aihubmix.com/v1" />
+
+  <label>API Key</label>
+  <input id="apiKey" type="password" placeholder="sk-..." />
+
+  <label>模型</label>
+  <input id="model" placeholder="qwen3-max" />
+
+  <label>温度 (temperature)</label>
+  <input id="temperature" type="number" step="0.1" min="0" max="2" placeholder="0.3" />
+
+  <div>
+    <button id="save">保存</button>
+    <span id="saved"></span>
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>
