@@ -76,8 +76,13 @@ def _stream_chat_completion(
         return None, None, f"{type(exc).__name__}: {exc}"
 
     if response.status_code != 200:
-        body_preview = response.text[:300].replace("\n", " ").strip()
-        return None, None, f"HTTP {response.status_code}: {body_preview or 'empty response'}"
+        try:
+            body_preview = response.text[:300].replace("\n", " ").strip()
+            return None, None, f"HTTP {response.status_code}: {body_preview or 'empty response'}"
+        except Exception as exc:
+            return None, None, f"HTTP {response.status_code}: 读取错误响应失败（{type(exc).__name__}）"
+        finally:
+            response.close()
 
     content_parts: List[str] = []
     finish_reason: Optional[str] = None
@@ -99,8 +104,12 @@ def _stream_chat_completion(
                 continue
             try:
                 event = json.loads(data)
-            except Exception:
-                continue
+            except (ValueError, UnicodeError):
+                stream_error = "流式响应包含无法解析的数据，内容可能缺失"
+                break
+            if event.get("error"):
+                stream_error = "流式响应返回 API 错误"
+                break
             choices = event.get("choices") or []
             if not choices:
                 continue
@@ -123,6 +132,8 @@ def _stream_chat_completion(
     content = "".join(content_parts)
     if not content:
         return None, finish_reason, stream_error or "流式响应未返回内容"
+    if not stream_error and finish_reason is None:
+        stream_error = "流式响应未收到 finish_reason，无法确认内容完整"
     return content, finish_reason, stream_error
 
 
@@ -155,16 +166,20 @@ def _call_llm_result(prompt: str, llm: Dict[str, Any], max_tokens: int = 16000) 
         for attempt in range(1, retries + 1):
             session = requests.Session()
             session.trust_env = trust_env
-            content, finish_reason, error = _stream_chat_completion(
-                session, url, headers, payload, timeout
-            )
-            if content:
-                if finish_reason == "length" and max_tokens < 65000:
-                    max_tokens = min(max_tokens * 2, 65000)
-                    payload["max_tokens"] = max_tokens
-                    continue
+            try:
+                content, finish_reason, error = _stream_chat_completion(
+                    session, url, headers, payload, timeout
+                )
+            finally:
+                session.close()
+            # Nonempty output is not proof of a completed response. Never pass
+            # interrupted, filtered, or token-limited content to downstream merges.
+            if content and not error and finish_reason == "stop":
                 return content, None
-            last_error = error or "未知错误"
+            last_error = error or f"模型响应不完整（finish_reason={finish_reason or 'missing'}）"
+            if not error and finish_reason == "length" and max_tokens < 65000:
+                max_tokens = min(max_tokens * 2, 65000)
+                payload["max_tokens"] = max_tokens
             # ProxyError：换 trust_env 模式
             if "ProxyError" in last_error:
                 if trust_env and attempt == retries:
@@ -428,14 +443,14 @@ def _build_transcript_chunks(
     return chunks
 
 
-def _fallback_notes(course_name: str, date_str: str, title: str, transcript_lines: List[dict], platform_summary: dict) -> str:
+def _fallback_notes(course_name: str, date_str: str, title: str, transcript_lines: List[dict], platform_summary: dict, *, reason: str = "未配置可用 LLM") -> str:
     summary_data = (platform_summary or {}).get("data") or {}
     key_points = summary_data.get("keyPoints") or []
     document_skims = summary_data.get("documentSkims") or []
     md = [
         f"# {course_name} · {date_str} · {title}",
         "",
-        "> 未配置可用 LLM，以下为平台摘要和转录摘录。",
+        f"> {reason}，以下仅为平台摘要和前 40 条转录摘录，不是完整 AI 笔记。",
         "",
         "## 一、平台概要",
         "",
@@ -584,6 +599,32 @@ def _build_merge_prompt(partial_notes: List[str], course_name: str, date_str: st
 """
 
 
+def _incomplete_notes(
+    chunks: List[dict], results: Dict[int, str], *, course_name: str,
+    date_str: str, title: str, transcript_lines: List[dict], platform_summary: dict,
+) -> str:
+    """Add coverage outside model output; never ask a model to hide gaps by merging."""
+    total = len(chunks)
+    parts = [
+        f"# {course_name} · {date_str} · {title}", "",
+        f"> ⚠️ **笔记不完整**：仅 {len(results)}/{total} 个分片生成成功。缺失内容未被其他分片替代。",
+        "> 请对照原始转录；可使用 `cb notes <课程> --glob <对应转录文件名> --force` 重新生成（会重新请求模型）。",
+        "> 下列时间为该分片首、末条转录的起始时间，不代表精确课堂覆盖时长。", "",
+    ]
+    for idx, chunk in enumerate(chunks, 1):
+        label = f"分片 {idx}/{total}（{_fmt_time(chunk['start'])}-{_fmt_time(chunk['end'])}）"
+        if idx in results:
+            parts.extend([f"## {label}", results[idx], ""])
+        else:
+            parts.extend([f"## 缺失{label}", "> 未取得完整模型响应，本段尚未生成可靠笔记。", ""])
+    if not results:
+        parts.append(_fallback_notes(
+            course_name, date_str, title, transcript_lines, platform_summary,
+            reason="模型生成失败或响应不完整",
+        ))
+    return "\n".join(parts)
+
+
 def summarize_transcript_files(
     *,
     transcript_path: str,
@@ -663,7 +704,7 @@ def summarize_transcript_files(
                 if result:
                     progress(f"分片 {idx}/{total}：模型返回成功。")
                 else:
-                    progress(f"分片 {idx}/{total}：未拿到结果（{error or '未知原因'}），将依赖其他分片继续合并。")
+                    progress(f"分片 {idx}/{total}：未拿到完整结果（{error or '未知原因'}），将标记为缺失。")
             return idx, result
 
         max_workers = min(total, 4)
@@ -674,9 +715,24 @@ def summarize_transcript_files(
                 for idx, chunk in enumerate(transcript_chunks, start=1)
             }
             for future in as_completed(futures):
-                idx, result = future.result()
+                try:
+                    idx, result = future.result()
+                except Exception:
+                    # A worker failure must not erase the successful siblings.
+                    idx, result = futures[future], None
+                    if progress:
+                        progress(f"分片 {idx}/{total}：处理异常，将标记为缺失。")
                 if result:
                     results_by_idx[idx] = result
+
+        if len(results_by_idx) != total:
+            if progress:
+                progress(f"笔记不完整：仅 {len(results_by_idx)}/{total} 个分片成功，已标记缺失位置；未进行总合并。")
+            return _fix_inline_math(_incomplete_notes(
+                transcript_chunks, results_by_idx,
+                course_name=course_name, date_str=date_str, title=title,
+                transcript_lines=transcript_lines, platform_summary=platform_summary,
+            ))
 
         partial_notes = [results_by_idx[k] for k in sorted(results_by_idx)]
 
@@ -699,5 +755,8 @@ def summarize_transcript_files(
                 return _fix_inline_math(partial_notes[0])
             return _fix_inline_math("\n\n---\n\n".join(partial_notes))
     if progress:
-        progress("模型结果不可用，回退到平台摘要和转录摘录。")
-    return _fallback_notes(course_name, date_str, title, transcript_lines, platform_summary)
+        progress("笔记不完整：模型结果不可用，回退到平台摘要和转录摘录。")
+    return _incomplete_notes(
+        transcript_chunks, {}, course_name=course_name, date_str=date_str, title=title,
+        transcript_lines=transcript_lines, platform_summary=platform_summary,
+    )
